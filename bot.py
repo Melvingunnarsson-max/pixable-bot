@@ -164,11 +164,54 @@ def build_summary(assignee: str, task_list: list) -> str:
     return '\n'.join(lines).strip()
 
 
-# ── Daily summary loop (08:00 Stockholm) ───────────────────────────────────────
+def build_reminder(assignee: str, task_list: list, label: str):
+    """Shorter reminder showing only overdue + due today tasks. Returns None if nothing urgent."""
+    today = date.today()
+    urgent = []
 
-@tasks.loop(time=datetime.now(STOCKHOLM).replace(hour=8, minute=0, second=0, microsecond=0).timetz())
+    for t in task_list:
+        raw = t.get('due_date')
+        d = None
+        if raw:
+            try:
+                d = date.fromisoformat(raw[:10])
+            except ValueError:
+                pass
+        if d is not None and d <= today:
+            urgent.append((t, d))
+
+    if not urgent:
+        return None
+
+    def fmt_task(t, d):
+        title = t.get('title', '(no title)')
+        customer = t.get('customer_name')
+        mins = t.get('estimated_minutes')
+        line = f'• {title}'
+        if customer:
+            line += f' [{customer}]'
+        if mins:
+            line += f'  _({mins} min)_'
+        return line
+
+    lines = [f'{label} **{assignee}** — {len(urgent)} uppgift(er) kvar idag:', '']
+    for t, d in urgent:
+        lines.append(fmt_task(t, d))
+    return '\n'.join(lines).strip()
+
+
+# ── Scheduled messages (08:00, 12:00, 16:00 Stockholm) ────────────────────────
+
+_TIMES = [
+    datetime.now(STOCKHOLM).replace(hour=8,  minute=0, second=0, microsecond=0).timetz(),
+    datetime.now(STOCKHOLM).replace(hour=12, minute=0, second=0, microsecond=0).timetz(),
+    datetime.now(STOCKHOLM).replace(hour=16, minute=0, second=0, microsecond=0).timetz(),
+]
+
+@tasks.loop(time=_TIMES)
 async def daily_summary():
-    print(f'Running daily summary at {datetime.now(STOCKHOLM).strftime("%H:%M %Z")}')
+    now_hour = datetime.now(STOCKHOLM).hour
+    print(f'Running scheduled message at {datetime.now(STOCKHOLM).strftime("%H:%M %Z")}')
     guild = discord.utils.get(client.guilds)
     if not guild:
         print('No guild found.')
@@ -181,10 +224,21 @@ async def daily_summary():
             continue
 
         task_list = await fetch_tasks(assignee)
-        summary = build_summary(assignee, task_list)
+
+        if now_hour == 8:
+            message = build_summary(assignee, task_list)
+        elif now_hour == 12:
+            message = build_reminder(assignee, task_list, '🍽️ Lunchpåminnelse —')
+        else:
+            message = build_reminder(assignee, task_list, '🔔 Slutpåminnelse —')
+
+        if message is None:
+            print(f'Nothing urgent for {assignee}, skipping reminder.')
+            continue
+
         try:
-            await channel.send(summary)
-            print(f'Sent summary to #{channel_name}')
+            await channel.send(message)
+            print(f'Sent to #{channel_name}')
         except Exception as e:
             print(f'Error sending to #{channel_name}: {e}')
 
