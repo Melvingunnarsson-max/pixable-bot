@@ -1,7 +1,7 @@
 import discord
+from discord import app_commands
 import aiohttp
 import os
-import re
 from datetime import datetime
 
 DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
@@ -11,26 +11,40 @@ CHANNEL_NAME = 'pixable'
 
 intents = discord.Intents.default()
 intents.message_content = True
-client = discord.Client(intents=intents)
 
 
-def parse_fields(raw: str) -> dict:
-    parts = [p.strip() for p in raw.split('|')]
-    result = {'title': parts[0]}
-    for part in parts[1:]:
-        m = re.match(r'^(?:customer|kund|client)\s*:\s*(.+)', part, re.IGNORECASE)
-        if m:
-            result['customer_name'] = m.group(1).strip()
-            continue
-        m = re.match(r'^(?:deadline|due|datum|forfall)\s*:\s*(.+)', part, re.IGNORECASE)
-        if m:
-            result['due_date'] = m.group(1).strip()
-            continue
-        m = re.match(r'^(?:time|tid|minutes|min|estimated)\s*:\s*(\d+)', part, re.IGNORECASE)
-        if m:
-            result['estimated_minutes'] = int(m.group(1))
-            continue
-    return result
+class PixableBot(discord.Client):
+    def __init__(self):
+        super().__init__(intents=intents)
+        self.tree = app_commands.CommandTree(self)
+
+    async def setup_hook(self):
+        await self.tree.sync()
+        print('Slash commands synced.')
+
+
+client = PixableBot()
+
+
+async def fetch_customers(query: str) -> list:
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                EDGE_FUNCTION_URL,
+                json={'action': 'get_customers', 'query': query},
+                headers={'x-bot-secret': BOT_SECRET, 'Content-Type': 'application/json'}
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get('customers', [])
+    except Exception as e:
+        print(f'Error fetching customers: {e}')
+    return []
+
+
+async def customer_autocomplete(interaction, current):
+    customers = await fetch_customers(current)
+    return [app_commands.Choice(name=c['name'], value=c['name']) for c in customers[:25]]
 
 
 @client.event
@@ -38,66 +52,62 @@ async def on_ready():
     print(f'Pixable Bot is online as {client.user}')
 
 
-@client.event
-async def on_message(message):
-    if message.author == client.user:
+@client.tree.command(name='task', description='Add a task to Pixable')
+@app_commands.describe(
+    title='What needs to be done',
+    customer='Customer to assign this to (optional)',
+    deadline='Due date, e.g. 2026-07-15 (optional)',
+    time='Estimated time in minutes (optional)',
+)
+@app_commands.autocomplete(customer=customer_autocomplete)
+async def task_command(interaction, title: str, customer: str = None, deadline: str = None, time: int = None):
+    if interaction.channel.name != CHANNEL_NAME:
+        await interaction.response.send_message(f'Use this in #{CHANNEL_NAME}.', ephemeral=True)
         return
-    if message.channel.name != CHANNEL_NAME:
-        return
-    content = message.content.strip()
-    task_match = re.match(
-        r'^(?:task|add task|create task|uppgift|ny uppgift|lagg till uppgift)[:\s]+(.+)',
-        content, re.IGNORECASE | re.DOTALL
-    )
-    meeting_match = re.match(
-        r'^(?:meeting|add meeting|mote|nytt mote|boka mote|lagg till mote)[:\s]+(.+)',
-        content, re.IGNORECASE
-    )
-    help_match = re.match(r'^(help|\?|hjalp)$', content, re.IGNORECASE)
-
-    if task_match:
-        fields = parse_fields(task_match.group(1).strip())
-        title = fields.pop('title')
-        payload = {'action': 'add_task', 'title': title, **fields}
-        extras = []
-        if 'customer_name' in fields:
-            extras.append(f"Customer: {fields['customer_name']}")
-        if 'due_date' in fields:
-            extras.append(f"Deadline: {fields['due_date']}")
-        if 'estimated_minutes' in fields:
-            extras.append(f"Time: {fields['estimated_minutes']} min")
-        success_msg = f'Task added: {title}'
-        if extras:
-            success_msg += ' | ' + ' | '.join(extras)
-    elif meeting_match:
-        title = meeting_match.group(1).strip()
-        payload = {'action': 'add_meeting', 'title': title, 'date': datetime.now().isoformat()}
-        success_msg = f'Meeting added: {title}'
-    elif help_match:
-        await message.channel.send(
-            'Pixable Bot Commands:\n\n'
-            'task: [title] - Add a task\n'
-            'task: [title] | customer: [name] | deadline: [YYYY-MM-DD] | time: [minutes]\n\n'
-            'meeting: [title] - Add a meeting\n\n'
-            'Swedish: uppgift / kund / tid / mote'
-        )
-        return
-    else:
-        return
-
+    await interaction.response.defer()
+    payload = {'action': 'add_task', 'title': title}
+    if customer:
+        payload['customer_name'] = customer
+    if deadline:
+        payload['due_date'] = deadline
+    if time:
+        payload['estimated_minutes'] = time
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(EDGE_FUNCTION_URL, json=payload,
                 headers={'x-bot-secret': BOT_SECRET, 'Content-Type': 'application/json'}) as resp:
                 if resp.status == 200:
-                    await message.reply(success_msg)
+                    lines = [f'Task added: {title}']
+                    if customer: lines.append(f'Customer: {customer}')
+                    if deadline: lines.append(f'Deadline: {deadline}')
+                    if time: lines.append(f'Time: {time} min')
+                    await interaction.followup.send('\n'.join(lines))
                 else:
-                    body = await resp.text()
-                    print(f'Error {resp.status}: {body}')
-                    await message.reply('Something went wrong.')
+                    await interaction.followup.send('Something went wrong.')
     except Exception as e:
         print(f'Error: {e}')
-        await message.reply('Could not reach the server.')
+        await interaction.followup.send('Could not reach the server.')
+
+
+@client.tree.command(name='meeting', description='Add a meeting to Pixable')
+@app_commands.describe(title='Meeting title')
+async def meeting_command(interaction, title: str):
+    if interaction.channel.name != CHANNEL_NAME:
+        await interaction.response.send_message(f'Use this in #{CHANNEL_NAME}.', ephemeral=True)
+        return
+    await interaction.response.defer()
+    payload = {'action': 'add_meeting', 'title': title, 'date': datetime.now().isoformat()}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(EDGE_FUNCTION_URL, json=payload,
+                headers={'x-bot-secret': BOT_SECRET, 'Content-Type': 'application/json'}) as resp:
+                if resp.status == 200:
+                    await interaction.followup.send(f'Meeting added: {title}')
+                else:
+                    await interaction.followup.send('Something went wrong.')
+    except Exception as e:
+        print(f'Error: {e}')
+        await interaction.followup.send('Could not reach the server.')
 
 
 client.run(DISCORD_TOKEN)
