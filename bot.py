@@ -18,8 +18,15 @@ PERSONAL_CHANNELS = {
     'arvid': 'Arvid',
 }
 
+# Channel name → Discord username to @mention in reminders
+CHANNEL_DISCORD_USERS = {
+    'melvin': 'Melle',
+    'arvid': 'xpfrallanmlg',
+}
+
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 
 
 class PixableBot(discord.Client):
@@ -107,7 +114,7 @@ def build_summary(assignee: str, task_list: list) -> str:
         title = t.get('title', '(no title)')
         customer = t.get('customer_name')
         mins = t.get('estimated_minutes')
-        line = f'• {title}'
+        line = f'\u2022 {title}'
         if customer:
             line += f' [{customer}]'
         details = []
@@ -120,52 +127,51 @@ def build_summary(assignee: str, task_list: list) -> str:
         return line
 
     now_str = datetime.now(STOCKHOLM).strftime('%A %-d %B')
-    lines = [f'📋 **Daglig sammanfattning för {assignee}** — {now_str}', '']
+    lines = [f'\U0001f4cb **Daglig sammanfattning f\u00f6r {assignee}** \u2014 {now_str}', '']
 
     if overdue:
-        lines.append(f'🔴 **Försenade ({len(overdue)})**')
+        lines.append(f'\U0001f534 **F\u00f6rsenade ({len(overdue)})**')
         for t, d in overdue:
             lines.append(fmt_task(t, d))
         lines.append('')
 
     if due_today:
-        lines.append(f'🟡 **Förfaller idag ({len(due_today)})**')
+        lines.append(f'\U0001f7e1 **F\u00f6rfaller idag ({len(due_today)})**')
         for t, d in due_today:
             lines.append(fmt_task(t, d))
         lines.append('')
 
     if due_tomorrow:
-        lines.append(f'🟠 **Förfaller imorgon ({len(due_tomorrow)})**')
+        lines.append(f'\U0001f7e0 **F\u00f6rfaller imorgon ({len(due_tomorrow)})**')
         for t, d in due_tomorrow:
             lines.append(fmt_task(t, d))
         lines.append('')
 
     if due_this_week:
-        lines.append(f'📅 **Denna vecka ({len(due_this_week)})**')
+        lines.append(f'\U0001f4c5 **Denna vecka ({len(due_this_week)})**')
         for t, d in due_this_week:
             lines.append(fmt_task(t, d))
         lines.append('')
 
     if later:
-        lines.append(f'🔵 **Senare ({len(later)})**')
+        lines.append(f'\U0001f535 **Senare ({len(later)})**')
         for t, d in later:
             lines.append(fmt_task(t, d))
         lines.append('')
 
     if no_date:
-        lines.append(f'📌 **Inget datum ({len(no_date)})**')
+        lines.append(f'\U0001f4cc **Inget datum ({len(no_date)})**')
         for t, d in no_date:
             lines.append(fmt_task(t, d))
         lines.append('')
 
     if not task_list:
-        lines.append('✅ Inga öppna uppgifter — bra jobbat!')
+        lines.append('\u2705 Inga \u00f6ppna uppgifter \u2014 bra jobbat!')
 
     return '\n'.join(lines).strip()
 
 
 def build_reminder(assignee: str, task_list: list, label: str):
-    """Shorter reminder showing only overdue + due today tasks. Returns None if nothing urgent."""
     today = date.today()
     urgent = []
 
@@ -187,14 +193,14 @@ def build_reminder(assignee: str, task_list: list, label: str):
         title = t.get('title', '(no title)')
         customer = t.get('customer_name')
         mins = t.get('estimated_minutes')
-        line = f'• {title}'
+        line = f'\u2022 {title}'
         if customer:
             line += f' [{customer}]'
         if mins:
             line += f'  _({mins} min)_'
         return line
 
-    lines = [f'{label} **{assignee}** — {len(urgent)} uppgift(er) kvar idag:', '']
+    lines = [f'{label} **{assignee}** \u2014 {len(urgent)} uppgift(er) kvar idag:', '']
     for t, d in urgent:
         lines.append(fmt_task(t, d))
     return '\n'.join(lines).strip()
@@ -225,16 +231,26 @@ async def daily_summary():
 
         task_list = await fetch_tasks(assignee)
 
+        discord_username = CHANNEL_DISCORD_USERS.get(channel_name)
+        member = discord.utils.find(
+            lambda m, u=discord_username: m.name == u or m.display_name == u,
+            guild.members
+        ) if discord_username else None
+        mention = member.mention if member else (f'@{discord_username}' if discord_username else '')
+
         if now_hour == 8:
             message = build_summary(assignee, task_list)
         elif now_hour == 12:
-            message = build_reminder(assignee, task_list, '🍽️ Lunchpåminnelse —')
+            message = build_reminder(assignee, task_list, '\U0001f37d\ufe0f Lunchp\u00e5minnelse \u2014')
         else:
-            message = build_reminder(assignee, task_list, '🔔 Slutpåminnelse —')
+            message = build_reminder(assignee, task_list, '\U0001f514 Slutp\u00e5minnelse \u2014')
 
         if message is None:
             print(f'Nothing urgent for {assignee}, skipping reminder.')
             continue
+
+        if now_hour != 8 and mention:
+            message = f'{mention}\n{message}'
 
         try:
             await channel.send(message)
@@ -287,7 +303,7 @@ async def task_command(
 ):
     if interaction.channel.name != CHANNEL_NAME:
         await interaction.response.send_message(
-            f'❌ Please use this command in **#{CHANNEL_NAME}**.', ephemeral=True
+            f'\u274c Please use this command in **#{CHANNEL_NAME}**.', ephemeral=True
         )
         return
 
@@ -309,21 +325,21 @@ async def task_command(
                 headers={'x-bot-secret': BOT_SECRET, 'Content-Type': 'application/json'}
             ) as resp:
                 if resp.status == 200:
-                    lines = [f'✅ **Task added:** {title}']
+                    lines = [f'\u2705 **Task added:** {title}']
                     if customer:
-                        lines.append(f'👤 **Customer:** {customer}')
+                        lines.append(f'\U0001f464 **Customer:** {customer}')
                     if deadline:
-                        lines.append(f'📅 **Deadline:** {deadline}')
+                        lines.append(f'\U0001f4c5 **Deadline:** {deadline}')
                     if time:
-                        lines.append(f'⏱ **Estimated time:** {time} min')
+                        lines.append(f'\u23f1 **Estimated time:** {time} min')
                     await interaction.followup.send('\n'.join(lines))
                 else:
                     body = await resp.text()
                     print(f'Edge function error {resp.status}: {body}')
-                    await interaction.followup.send('❌ Something went wrong. Check the bot logs.')
+                    await interaction.followup.send('\u274c Something went wrong. Check the bot logs.')
     except Exception as e:
         print(f'Error: {e}')
-        await interaction.followup.send('❌ Could not reach the server.')
+        await interaction.followup.send('\u274c Could not reach the server.')
 
 
 # ── /meeting ───────────────────────────────────────────────────────────────────
@@ -336,7 +352,7 @@ async def meeting_command(
 ):
     if interaction.channel.name != CHANNEL_NAME:
         await interaction.response.send_message(
-            f'❌ Please use this command in **#{CHANNEL_NAME}**.', ephemeral=True
+            f'\u274c Please use this command in **#{CHANNEL_NAME}**.', ephemeral=True
         )
         return
 
@@ -356,14 +372,14 @@ async def meeting_command(
                 headers={'x-bot-secret': BOT_SECRET, 'Content-Type': 'application/json'}
             ) as resp:
                 if resp.status == 200:
-                    await interaction.followup.send(f'✅ **Meeting added:** {title}')
+                    await interaction.followup.send(f'\u2705 **Meeting added:** {title}')
                 else:
                     body = await resp.text()
                     print(f'Edge function error {resp.status}: {body}')
-                    await interaction.followup.send('❌ Something went wrong.')
+                    await interaction.followup.send('\u274c Something went wrong.')
     except Exception as e:
         print(f'Error: {e}')
-        await interaction.followup.send('❌ Could not reach the server.')
+        await interaction.followup.send('\u274c Could not reach the server.')
 
 
 # ── /summary ───────────────────────────────────────────────────────────────────
@@ -374,7 +390,7 @@ async def summary_command(interaction: discord.Interaction):
     assignee = PERSONAL_CHANNELS.get(channel_name)
     if not assignee:
         await interaction.response.send_message(
-            '❌ This command only works in **#melvin** or **#arvid**.', ephemeral=True
+            '\u274c This command only works in **#melvin** or **#arvid**.', ephemeral=True
         )
         return
 
